@@ -5,6 +5,7 @@ from playwright.sync_api import sync_playwright
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME")
 
 WIZZ_URL = "https://wizzair.com/en-gb"
 
@@ -17,8 +18,7 @@ PROMO_PATTERNS = [
 
 def send_telegram_message(text):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials missing. Printing message instead:")
-        print(text)
+        print("Telegram credentials missing!")
         return
     
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -27,7 +27,8 @@ def send_telegram_message(text):
         "text": text,
         "parse_mode": "HTML"
     }
-    requests.post(url, json=payload)
+    res = requests.post(url, json=payload)
+    print(f"Telegram response status: {res.status_code}")
 
 def check_wizz_promos():
     with sync_playwright() as p:
@@ -64,6 +65,15 @@ def check_wizz_promos():
                 print("Promos found! Notification sent.")
             else:
                 print("No special promos found in this check.")
+                # אם הופעל ידנית על ידך - שלח הודעת בדיקה לטלגרם!
+                if EVENT_NAME == "workflow_dispatch":
+                    test_msg = (
+                        "✅ <b>בדיקת מערכת: הבוט של Wizz Air מחובר ועובד!</b>\n\n"
+                        "נסרק עמוד הבית וכרגע אין מבצע מיוחד. "
+                        "אני אמשיך לבדוק בשקט כל שעה ואקפיץ לך הודעה רק כשיתחיל מבצע אמיתי."
+                    )
+                    send_telegram_message(test_msg)
+                    print("Test notification sent to Telegram!")
                 
         except Exception as e:
             print(f"Error during scan: {e}")

@@ -9,11 +9,22 @@ EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME")
 
 WIZZ_URL = "https://wizzair.com/en-gb"
 
+# ביטויים של מבצעי טיסות אמיתיים
 PROMO_PATTERNS = [
     r"\b\d{1,2}%\s*(?:off|discount)\b",
     r"\bflash\s*sale\b",
-    r"\bselected\s*flights\b",
-    r"\bpromo\s*code\b"
+    r"\bselected\s*flights\b"
+]
+
+# ביטויים קבועים באתר שמתעלמים מהם (כמו מלונות, השכרת רכב או שדה קופון ריק)
+IGNORE_PHRASES = [
+    "hotel booking",
+    "home away from home",
+    "wizz credit",
+    "car hire",
+    "apply promo code",
+    "booking.com",
+    "rentalcars"
 ]
 
 def send_telegram_message(text):
@@ -50,6 +61,12 @@ def check_wizz_promos():
             for line in body_text.split("\n"):
                 clean_line = line.strip()
                 if 5 < len(clean_line) < 200:
+                    lower_line = clean_line.lower()
+                    
+                    # דילוג על פרסומות קבועות של מלונות ורכבים
+                    if any(ignore in lower_line for ignore in IGNORE_PHRASES):
+                        continue
+                        
                     for pattern in PROMO_PATTERNS:
                         if re.search(pattern, clean_line, re.IGNORECASE):
                             found_promos.add(clean_line)
@@ -57,20 +74,19 @@ def check_wizz_promos():
             if found_promos:
                 promo_list = "\n• ".join(list(found_promos)[:6])
                 message = (
-                    f"🎉 <b>זוהה מבצע אפשרי באתר Wizz Air!</b>\n\n"
+                    f"🎉 <b>זוהה מבצע חדש באתר Wizz Air!</b>\n\n"
                     f"הטקסטים שאותרו בעמוד הבית:\n• {promo_list}\n\n"
                     f"<a href='{WIZZ_URL}'>לכניסה לאתר Wizz Air</a>"
                 )
                 send_telegram_message(message)
                 print("Promos found! Notification sent.")
             else:
-                print("No special promos found in this check.")
-                # אם הופעל ידנית על ידך - שלח הודעת בדיקה לטלגרם!
+                print("No special flight promos found in this check.")
                 if EVENT_NAME == "workflow_dispatch":
                     test_msg = (
-                        "✅ <b>בדיקת מערכת: הבוט של Wizz Air מחובר ועובד!</b>\n\n"
-                        "נסרק עמוד הבית וכרגע אין מבצע מיוחד. "
-                        "אני אמשיך לבדוק בשקט כל שעה ואקפיץ לך הודעה רק כשיתחיל מבצע אמיתי."
+                        "✅ <b>הבוט של Wizz Air מעודכן ומוכן!</b>\n\n"
+                        "סיננתי את הפרסומות הקבועות של המלונות. כרגע אין מבצע מיוחד על טיסות – "
+                        "אמשיך לבדוק בשקט כל שעה ואעדכן אותך ברגע שיעלה מבצע אמיתי!"
                     )
                     send_telegram_message(test_msg)
                     print("Test notification sent to Telegram!")

@@ -2,15 +2,30 @@ import os
 import re
 import requests
 from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 EVENT_NAME = os.environ.get("GITHUB_EVENT_NAME")
 
+# הגדרות ספים
 WIZZ_URL = "https://wizzair.com/en-gb"
-MAX_PRICE_EUR = 50
-MAX_PRICE_ILS = 205  # שווה ערך לכ-50 אירו
+MAX_FLIGHT_PRICE_EUR = 50
+
+# רשימת המשחקים למעקב
+GAMES_TO_TRACK = [
+    {
+        "name": "EA Sports FC 27 (Xbox)",
+        "url": "https://www.allkeyshop.com/blog/buy-ea-sports-fc-27-xbox-series-x-s-code-compare-prices/",
+        "max_price": 50.0
+    },
+    {
+        "name": "NBA 2K27 (Xbox)",
+        "url": "https://www.allkeyshop.com/blog/buy-nba-2k27-xbox-series-x-s-code-compare-prices/",
+        "max_price": 50.0
+    }
+]
 
 PROMO_PATTERNS = [
     r"\b\d{1,2}%\s*(?:off|discount)\b",
@@ -44,10 +59,6 @@ def send_telegram_message(text):
     print(f"Telegram response status: {res.status_code}")
 
 def check_cheap_flights_graphql():
-    """
-    שליפת טיסות ישירות של Wizz Air מתל אביב לחצי השנה הקרובה מתחת ל-50 אירו
-    דרך ה-API הפתוח של Kiwi Umbrella (ללא צורך במפתח וללא חסימות בוטים)
-    """
     cheap_flights = []
     today = datetime.now()
     six_months = today + timedelta(days=180)
@@ -86,13 +97,13 @@ def check_cheap_flights_graphql():
             "passengers": {"adults": 1},
             "filters": {
                 "maxStopovers": 0,
-                "carriers": {"include": ["W6", "W4", "5W"]}, # קודי החברות של Wizz Air
-                "price": {"end": MAX_PRICE_EUR}
+                "carriers": {"include": ["W6", "W4", "5W"]},
+                "price": {"end": MAX_FLIGHT_PRICE_EUR}
             },
             "options": {
                 "currency": "EUR",
                 "sortBy": "PRICE",
-                "limit": 10
+                "limit": 5
             }
         }
     }
@@ -108,12 +119,11 @@ def check_cheap_flights_graphql():
             )
             for item in itineraries:
                 price = float(item["price"]["amount"])
-                if price <= MAX_PRICE_EUR:
+                if price <= MAX_FLIGHT_PRICE_EUR:
                     seg = item["sector"]["sectorSegments"][0]["segment"]
                     dest_city = seg["destination"]["station"]["name"]
                     dest_code = seg["destination"]["station"]["code"]
                     dep_time = seg["source"]["localTime"][:10]
-                    # המרת תאריך לפורמט נוח DD/MM/YYYY
                     dep_formatted = datetime.strptime(dep_time, "%Y-%m-%d").strftime("%d/%m/%Y")
                     cheap_flights.append(
                         f"✈️ <b>{dest_city} ({dest_code})</b> | {dep_formatted} | <b>{price:.0f}€</b>"
@@ -123,10 +133,53 @@ def check_cheap_flights_graphql():
         
     return cheap_flights
 
-def check_wizz_promos():
-    found_promos = set()
-    low_fares_on_site = set()
+def check_games_prices():
+    triggered_games = []
+    game_status_reports = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
     
+    for game in GAMES_TO_TRACK:
+        lowest_price = None
+        try:
+            print(f"Checking price for {game['name']}...")
+            response = requests.get(game["url"], headers=headers, timeout=20)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                price_elements = soup.find_all(class_=lambda x: x and 'price' in x.lower())
+                
+                found_prices = []
+                for el in price_elements:
+                    text = el.get_text().strip()
+                    if '$' in text or 'USD' in text:
+                        match = re.search(r'\$?(\d{1,3}\.\d{2})', text)
+                        if match:
+                            try:
+                                p = float(match.group(1))
+                                if 5.0 <= p <= 200.0:
+                                    found_prices.append(p)
+                            except:
+                                pass
+                                
+                if found_prices:
+                    lowest_price = min(found_prices)
+                    if lowest_price <= game["max_price"]:
+                        triggered_games.append(
+                            f"🎮 <b>{game['name']}</b> ירד ל-<b>${lowest_price:.2f}</b>!\n<a href='{game['url']}'>לרכישת הקוד</a>"
+                        )
+        except Exception as e:
+            print(f"Error checking {game['name']}: {e}")
+            
+        current_str = f"${lowest_price:.2f}" if lowest_price else "לא זוהה"
+        game_status_reports.append(f"• {game['name']}: {current_str}")
+        
+    return triggered_games, game_status_reports
+
+def run_all_checks():
+    found_promos = set()
+    
+    # 1. בדיקת Wizz Air (דפדפן)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -134,79 +187,62 @@ def check_wizz_promos():
             viewport={"width": 1920, "height": 1080}
         )
         page = context.new_page()
-        
         try:
-            print("Connecting to Wizz Air...")
             page.goto(WIZZ_URL, timeout=60000, wait_until="domcontentloaded")
             page.wait_for_timeout(6000)
-            
             body_text = page.inner_text("body")
-            
             for line in body_text.split("\n"):
                 clean_line = line.strip()
                 if 5 < len(clean_line) < 200:
                     lower_line = clean_line.lower()
-                    
                     if any(ignore in lower_line for ignore in IGNORE_PHRASES):
                         continue
-                        
-                    # 1. בדיקת באנרים של מבצעים כלליים
                     for pattern in PROMO_PATTERNS:
                         if re.search(pattern, clean_line, re.IGNORECASE):
                             found_promos.add(clean_line)
-                            
-                    # 2. בדיקת מחירים מתחת ל-50 אירו / 205 ש"ח שמופיעים בעמוד
-                    eur_match = re.search(r"(?:€|EUR)\s*(\d{1,2})(?:\.\d{2})?\b|\b(\d{1,2})(?:\.\d{2})?\s*(?:€|EUR)", clean_line)
-                    if eur_match:
-                        val = int(eur_match.group(1) or eur_match.group(2))
-                        if 9 <= val <= MAX_PRICE_EUR:
-                            low_fares_on_site.add(clean_line)
-                            
-                    ils_match = re.search(r"(?:₪|ILS)\s*(\d{2,3})\b|\b(\d{2,3})\s*(?:₪|ILS)", clean_line)
-                    if ils_match:
-                        val = int(ils_match.group(1) or ils_match.group(2))
-                        if 35 <= val <= MAX_PRICE_ILS:
-                            low_fares_on_site.add(clean_line)
-                            
         except Exception as e:
-            print(f"Error during site scan: {e}")
+            print(f"Error scanning Wizz Air: {e}")
         finally:
             browser.close()
 
-    # 3. בדיקת טיסות Wizz Air מתל אביב לחצי השנה הקרובה מתחת ל-50 אירו
-    print("Checking TLV Wizz Air flights under 50 EUR for the next 6 months...")
+    # 2. בדיקת טיסות זולות מתל אביב
     cheap_tlv_flights = check_cheap_flights_graphql()
 
-    # בניית ההודעה לטלגרם
-    messages_parts = []
+    # 3. בדיקת מחירי המשחקים
+    triggered_games, game_status_reports = check_games_prices()
+
+    # בניית הודעה כוללת
+    message_parts = []
     
     if found_promos:
-        promo_list = "\n• ".join(list(found_promos)[:5])
-        messages_parts.append(f"🎉 <b>זוהה מבצע באתר Wizz Air:</b>\n• {promo_list}")
+        promo_list = "\n• ".join(list(found_promos)[:4])
+        message_parts.append(f"🎉 <b>מבצע באתר Wizz Air:</b>\n• {promo_list}")
         
     if cheap_tlv_flights:
-        flights_list = "\n".join(cheap_tlv_flights[:8])
-        messages_parts.append(f"🔥 <b>טיסות Wizz Air מתל אביב מתחת ל-50€ (בחצי השנה הקרובה):</b>\n{flights_list}")
-    elif low_fares_on_site:
-        fares_list = "\n• ".join(list(low_fares_on_site)[:5])
-        messages_parts.append(f"💸 <b>מחירי רצפה שזוהו באתר:</b>\n• {fares_list}")
+        flights_list = "\n".join(cheap_tlv_flights[:5])
+        message_parts.append(f"✈️ <b>טיסות Wizz Air מתל אביב מתחת ל-50€:</b>\n{flights_list}")
+        
+    if triggered_games:
+        games_list = "\n\n".join(triggered_games)
+        message_parts.append(f"🔥 <b>התרעת ירידת מחיר למשחקים!</b>\n\n{games_list}")
 
-    if messages_parts:
-        full_msg = "\n\n".join(messages_parts) + f"\n\n<a href='{WIZZ_URL}'>לכניסה לאתר Wizz Air</a>"
-        send_telegram_message(full_msg)
-        print("Alerts found! Notification sent.")
+    if message_parts:
+        final_msg = "\n\n".join(message_parts)
+        send_telegram_message(final_msg)
+        print("Alerts sent successfully!")
     else:
-        print("No promos or <50 EUR flights found right now.")
+        print("No active alerts triggered.")
+        # אם הופעל ידנית לבדיקת מערכת
         if EVENT_NAME == "workflow_dispatch":
+            games_report_str = "\n".join(game_status_reports)
             test_msg = (
-                "✅ <b>הבוט המשודרג של Wizz Air פועל!</b>\n\n"
-                "נבדקו עכשיו שני הדברים:\n"
-                "1️⃣ מבצעים והנחות בעמוד הבית של Wizz Air.\n"
-                "2️⃣ טיסות ישירות מנתב\"ג לחצי השנה הקרובה מתחת ל-50€ לכיוון.\n\n"
-                "כרגע אין מציאות מתחת לרף הזה – אמשיך לסרוק כל שעה ואקפיץ לך הודעה מיד כשיימצא משהו!"
+                "✅ <b>הבוט המשולב פועל ותקין!</b>\n\n"
+                "📊 <b>סטטוס נוכחי:</b>\n"
+                "• Wizz Air (טיסות ומבצעים): אין מציאות כרגע מתחת לרף.\n"
+                f"• מחירי משחקים נסרקים:\n{games_report_str}\n\n"
+                "אמשיך לרוץ אוטומטית ברקע ולעדכן אותך ברגע שישתנה משהו!"
             )
             send_telegram_message(test_msg)
-            print("Test notification sent!")
 
 if __name__ == "__main__":
-    check_wizz_promos()
+    run_all_checks()
